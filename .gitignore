@@ -1,0 +1,20 @@
+# Gradle / Android build output
+.gradle/
+build/
+app/build/
+.cxx/
+
+# IDE / tooling
+.idea/
+*.iml
+.DS_Store
+
+# Local configuration
+local.properties
+.venv/
+
+# Profiling / captures
+captures/
+
+# IntelliJ run configs
+.run/

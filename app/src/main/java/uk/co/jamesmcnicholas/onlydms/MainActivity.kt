@@ -1,4 +1,4 @@
-package com.example.onlydms
+package uk.co.jamesmcnicholas.onlydms
 
 import android.annotation.SuppressLint
 import android.content.Intent
@@ -16,6 +16,8 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.OnBackPressedCallback
+import androidx.core.net.toUri
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import java.io.ByteArrayInputStream
@@ -65,6 +67,19 @@ class MainActivity : ComponentActivity() {
             )
         }
         setContentView(webView)
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    if (::webView.isInitialized && webView.canGoBack()) {
+                        webView.goBack()
+                    } else {
+                        isEnabled = false
+                        onBackPressedDispatcher.onBackPressed()
+                    }
+                }
+            }
+        )
 
         imagesUnlocked = savedInstanceState?.getBoolean(STATE_IMAGES_UNLOCKED, false) ?: false
         configureWebView()
@@ -72,7 +87,7 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState)
         } else {
-            webView.loadUrl(DIRECT_INBOX_URL)
+            webView.loadUrl(MESSAGES_URL)
         }
     }
 
@@ -81,7 +96,6 @@ class MainActivity : ComponentActivity() {
         with(webView.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
-            databaseEnabled = true
             mediaPlaybackRequiresUserGesture = true
             cacheMode = WebSettings.LOAD_DEFAULT
             loadsImagesAutomatically = imagesUnlocked
@@ -92,7 +106,10 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+            WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, true)
+        } else if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+            @Suppress("DEPRECATION")
             WebSettingsCompat.setForceDark(
                 webView.settings,
                 WebSettingsCompat.FORCE_DARK_AUTO
@@ -197,21 +214,13 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    override fun onBackPressed() {
-        if (::webView.isInitialized && webView.canGoBack()) {
-            webView.goBack()
-        } else {
-            super.onBackPressed()
-        }
-    }
-
     private fun handleUrlOverride(view: WebView?, uri: Uri?): Boolean {
         if (uri == null) return true
         return when {
             uri.isDirectRoute() -> false
             uri.isAuthRoute() -> false
             else -> {
-                view?.post { view.loadUrl(DIRECT_INBOX_URL) }
+                view?.post { view.loadUrl(MESSAGES_URL) }
                 true
             }
         }
@@ -228,15 +237,12 @@ class MainActivity : ComponentActivity() {
                 reinforceDirectUi()
             }
             uri.isAuthRoute() -> Unit
-            else -> view?.post { view.loadUrl(DIRECT_INBOX_URL) }
+            else -> view?.post { view.loadUrl(MESSAGES_URL) }
         }
     }
 
-    private fun String?.isDirectRoute(): Boolean =
-        parseUri(this)?.isDirectRoute() == true
-
     private fun parseUri(raw: String?): Uri? =
-        raw?.let { runCatching { Uri.parse(it) }.getOrNull() }
+        raw?.let { runCatching { it.toUri() }.getOrNull() }
 
     private fun Uri.isDirectRoute(): Boolean {
         val hostValue = host?.lowercase(Locale.US) ?: return false
@@ -356,7 +362,7 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
-        private const val DIRECT_INBOX_URL = "https://www.instagram.com/direct/inbox/"
+        private const val MESSAGES_URL = "https://www.instagram.com/direct/inbox/"
         private const val STATE_IMAGES_UNLOCKED = "state_images_unlocked"
         private val HEAVY_PATTERNS = listOf(
             ".mp4",

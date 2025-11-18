@@ -1,9 +1,9 @@
-package com.example.onlydms
+package uk.co.jamesmcnicholas.onlydms
 
 import android.app.Application
 import android.os.Process
 import android.webkit.WebView
-import androidx.webkit.WebViewCompat
+import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import java.net.URL
 import javax.net.ssl.HttpsURLConnection
@@ -18,10 +18,10 @@ class OnlyDMsApp : Application() {
 
     private fun warmUpWebView() {
         try {
-            if (WebViewFeature.isFeatureSupported(WebViewFeature.START_SAFE_BROWSING)) {
-                WebViewCompat.startSafeBrowsing(this) { /* no-op */ }
-            }
             WebView(this).apply {
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
+                    WebSettingsCompat.setSafeBrowsingEnabled(settings, true)
+                }
                 settings.javaScriptEnabled = false
                 setWillNotDraw(true)
                 destroy()

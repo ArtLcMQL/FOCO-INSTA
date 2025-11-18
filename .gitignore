@@ -18,3 +18,10 @@ captures/
 
 # IntelliJ run configs
 .run/
+
+
+/app/build/
+/app/release/
+/build/
+*.apk
+*.dm

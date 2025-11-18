@@ -230,13 +230,12 @@ class MainActivity : ComponentActivity() {
         val uri = parseUri(url) ?: return
         when {
             uri.isDirectRoute() -> {
-                if (!imagesUnlocked) {
-                    imagesUnlocked = true
-                    webView.settings.loadsImagesAutomatically = true
-                }
+                if (!imagesUnlocked) enableImages()
                 reinforceDirectUi()
             }
-            uri.isAuthRoute() -> Unit
+            uri.isAuthRoute() -> {
+                if (!imagesUnlocked) enableImages()
+            }
             else -> view?.post { view.loadUrl(MESSAGES_URL) }
         }
     }
@@ -258,6 +257,11 @@ class MainActivity : ComponentActivity() {
         return pathValue.startsWith("/accounts/login") ||
             pathValue.startsWith("/accounts/onetap") ||
             pathValue.startsWith("/challenge/")
+    }
+
+    private fun enableImages() {
+        imagesUnlocked = true
+        webView.settings.loadsImagesAutomatically = true
     }
 
     private fun Uri.isSecureHttps(): Boolean =

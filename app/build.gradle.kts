@@ -59,9 +59,9 @@ androidComponents {
         variant.outputs.forEach { output ->
             if (output is com.android.build.api.variant.impl.VariantOutputImpl) {
                 val fileName = if (variant.buildType == "release") {
-                    "OnlyDMS.apk"                    // nice clean name for release
+                    "OnlyDMs.apk"                    // nice clean name for release
                 } else {
-                    "OnlyDMS-${variant.buildType}.apk" // e.g. OnlyDMS-debug.apk
+                    "OnlyDMs-${variant.buildType}.apk" // e.g. OnlyDMs-debug.apk
                 }
                 output.outputFileName = fileName
             }

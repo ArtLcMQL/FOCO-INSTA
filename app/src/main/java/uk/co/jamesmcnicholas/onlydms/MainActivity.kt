@@ -345,90 +345,135 @@ class MainActivity : ComponentActivity() {
                     });
                 }
 
-                // DIAGNOSTICO TEMPORARIO - remover depois de identificar a estrutura.
-                // Instagram obfuscates class names, so the card holding a shared reel
-                // has to be identified by structure. This dumps the ancestor chain of
-                // every large media element as plain text, on screen, so the real
-                // markup can be read instead of guessed at.
-                function dumpStructure() {
-                    if (document.getElementById('onlydms-dump')) {
-                        return;
-                    }
-                    const media = [];
-                    document.querySelectorAll('img,video,canvas').forEach(el => {
-                        const r = el.getBoundingClientRect();
-                        if (r.height > 120 && r.width > 80) {
-                            media.push(el);
-                        }
-                    });
+                // Shared reels and posts, identified by shape rather than by name.
+                // Instagram obfuscates every class and the card is not a link, so the
+                // one thing that reliably distinguishes it from the rest of a thread is
+                // size: a media element far larger than an avatar or an emoji, wrapped
+                // in a tap target. The viewer overlay is skipped by the viewport check
+                // and prevented from opening by the tap guard instead.
+                const MIN_MEDIA_HEIGHT = 140;
+                const MIN_MEDIA_WIDTH = 90;
+                const MARK = 'onlydmsBlocked';
 
-                    const lines = [];
-                    lines.push('ELEMENTOS DE MIDIA GRANDES: ' + media.length);
-                    media.slice(0, 3).forEach((el, n) => {
-                        const r = el.getBoundingClientRect();
-                        lines.push('');
-                        lines.push('=== MIDIA ' + (n + 1) + ' === ' +
-                            Math.round(r.width) + 'x' + Math.round(r.height) +
-                            '  <' + el.tagName + '>');
-                        let node = el;
-                        for (let up = 0; up < 8 && node; up += 1) {
-                            const box = node.getBoundingClientRect();
-                            let desc = up + ': <' + node.tagName.toLowerCase() + '>';
-                            const role = node.getAttribute('role');
-                            const label = node.getAttribute('aria-label');
-                            const href = node.getAttribute('href');
-                            const tabindex = node.getAttribute('tabindex');
-                            if (role) { desc += ' role=' + role; }
-                            if (href) { desc += ' href=' + href; }
-                            if (label) { desc += ' label=' + label.slice(0, 30); }
-                            if (tabindex !== null) { desc += ' tabindex=' + tabindex; }
-                            desc += '  ' + Math.round(box.width) + 'x' + Math.round(box.height);
-                            lines.push(desc);
-                            node = node.parentElement;
-                        }
-                    });
-
-                    const box = document.createElement('div');
-                    box.id = 'onlydms-dump';
-                    box.style.cssText = 'position:fixed;inset:0;z-index:999999;' +
-                        'background:#000;color:#0f0;font:11px monospace;' +
-                        'padding:12px;overflow:auto;white-space:pre-wrap;';
-                    box.textContent = lines.join('\n');
-                    const close = document.createElement('button');
-                    close.textContent = 'FECHAR';
-                    close.style.cssText = 'position:fixed;top:8px;right:8px;z-index:1000000;' +
-                        'padding:8px 14px;background:#fff;color:#000;border:0;font:12px monospace;';
-                    close.onclick = function() {
-                        box.remove();
-                        close.remove();
-                    };
-                    document.body.appendChild(box);
-                    document.body.appendChild(close);
+                function isOverlay(rect) {
+                    return rect.height > window.innerHeight * 0.75;
                 }
 
-                function armDiagnostic() {
-                    if (window.__OnlyDMsDiag) {
+                // Climbs from the media element to the wrapper that hugs it - the card -
+                // and then to the element that owns the tap: a link, a role=button, or
+                // anything with a tabindex, whichever comes first.
+                function findCardAndOwner(media) {
+                    const base = media.getBoundingClientRect();
+                    let card = media;
+                    let node = media.parentElement;
+                    for (let up = 0; up < 6 && node && node !== document.body; up += 1) {
+                        const r = node.getBoundingClientRect();
+                        if (r.height > base.height + 80 || r.width > base.width + 80) {
+                            break;
+                        }
+                        card = node;
+                        node = node.parentElement;
+                    }
+                    let owner = card;
+                    node = card;
+                    for (let up = 0; up < 5 && node && node !== document.body; up += 1) {
+                        const role = node.getAttribute('role');
+                        if (node.tagName === 'A' || role === 'button' || role === 'link' ||
+                            node.hasAttribute('tabindex')) {
+                            owner = node;
+                            break;
+                        }
+                        node = node.parentElement;
+                    }
+                    return { card: card, owner: owner };
+                }
+
+                function swallowTap(e) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                }
+
+                const TAP_EVENTS = ['click', 'pointerdown', 'pointerup', 'mousedown',
+                    'mouseup', 'touchstart', 'touchend'];
+
+                function neutralize(media) {
+                    const found = findCardAndOwner(media);
+                    const card = found.card;
+                    const owner = found.owner;
+                    if (card.dataset[MARK] === '1') {
                         return;
                     }
-                    window.__OnlyDMsDiag = true;
-                    const btn = document.createElement('button');
-                    btn.textContent = 'DOM';
-                    btn.style.cssText = 'position:fixed;bottom:80px;right:10px;z-index:999998;' +
-                        'padding:10px 14px;background:#d00;color:#fff;border:0;' +
-                        'border-radius:8px;font:12px monospace;';
-                    btn.onclick = dumpStructure;
-                    document.body.appendChild(btn);
+                    card.dataset[MARK] = '1';
+                    owner.dataset[MARK] = '1';
+
+                    ['href', 'role', 'tabindex'].forEach(a => owner.removeAttribute(a));
+                    TAP_EVENTS.forEach(t => {
+                        owner.addEventListener(t, swallowTap, { capture: true, passive: false });
+                    });
+
+                    const note = document.createElement('div');
+                    note.textContent = 'Video recebido (bloqueado)';
+                    note.style.cssText = 'display:inline-block;padding:10px 14px;' +
+                        'border-radius:16px;background:rgba(127,127,127,0.18);' +
+                        'color:#8e8e8e;font-size:14px;line-height:1.3;';
+                    card.replaceChildren(note);
+                    card.style.cssText += ';height:auto !important;width:auto !important;' +
+                        'min-height:0 !important;aspect-ratio:auto !important;' +
+                        'padding:0 !important;pointer-events:none !important;';
+                }
+
+                function blockSharedMedia() {
+                    if (!window.location.pathname.startsWith('/direct/')) {
+                        return;
+                    }
+                    document.querySelectorAll('img,video').forEach(media => {
+                        try {
+                            const r = media.getBoundingClientRect();
+                            if (r.height < MIN_MEDIA_HEIGHT || r.width < MIN_MEDIA_WIDTH) {
+                                return;
+                            }
+                            if (isOverlay(r)) {
+                                return;
+                            }
+                            neutralize(media);
+                        } catch (e) {
+                            // never break the thread
+                        }
+                    });
+                }
+
+                // Messages keep arriving after load, so this must never expire.
+                function watchThread() {
+                    if (window.__OnlyDMsWatch) {
+                        return;
+                    }
+                    window.__OnlyDMsWatch = true;
+                    let last = 0;
+                    const observer = new MutationObserver(function() {
+                        const now = Date.now();
+                        if (now - last < 250) {
+                            return;
+                        }
+                        last = now;
+                        blockSharedMedia();
+                    });
+                    observer.observe(document.documentElement, {
+                        childList: true,
+                        subtree: true
+                    });
+                    setInterval(blockSharedMedia, 1500);
                 }
 
                 hideNav();
                 lazyMedia();
                 guardHistory();
-                armDiagnostic();
+                blockSharedMedia();
+                watchThread();
                 if (!window.__OnlyDMsDomGuard) {
                     window.__OnlyDMsDomGuard = setInterval(() => {
                         hideNav();
                         lazyMedia();
-                        armDiagnostic();
+                        blockSharedMedia();
                     }, 2000);
                     setTimeout(() => {
                         if (window.__OnlyDMsDomGuard) {

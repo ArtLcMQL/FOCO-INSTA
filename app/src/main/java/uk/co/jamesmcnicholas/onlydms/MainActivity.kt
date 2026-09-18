@@ -345,89 +345,90 @@ class MainActivity : ComponentActivity() {
                     });
                 }
 
-                const SHARED_MEDIA =
-                    'a[href*="/reel/"],a[href*="/reels/"],a[href*="/p/"],' +
-                    'a[href*="/tv/"],a[href*="/stories/"]';
-
-                // Instagram obfuscates its class names, so the href is the only stable
-                // anchor: a shared reel or post is always a link to /reel/ or /p/.
-                // The card is replaced outright rather than merely hidden, so the
-                // thread still reads as a conversation.
-                function blockSharedMedia() {
-                    document.querySelectorAll(SHARED_MEDIA).forEach(el => {
-                        if (el.dataset.onlydmsBlocked === '1') {
-                            return;
-                        }
-                        el.dataset.onlydmsBlocked = '1';
-                        el.removeAttribute('href');
-                        el.removeAttribute('role');
-                        el.style.pointerEvents = 'none';
-                        el.style.cursor = 'default';
-                        const note = document.createElement('span');
-                        note.textContent = 'Video recebido (bloqueado)';
-                        note.style.cssText = 'display:inline-block;padding:10px 14px;' +
-                            'border-radius:16px;background:rgba(127,127,127,0.18);' +
-                            'color:#8e8e8e;font-size:14px;line-height:1.3;';
-                        el.replaceChildren(note);
-                    });
-                }
-
-                // Second line of defence. Instagram opens the reel viewer as an overlay
-                // without changing the URL, so the route guard never sees it; swallowing
-                // the click in the capture phase stops it before the site's own handler
-                // runs, even on a card this pass has not rewritten yet.
-                function guardClicks() {
-                    if (window.__OnlyDMsClickGuard) {
+                // DIAGNOSTICO TEMPORARIO - remover depois de identificar a estrutura.
+                // Instagram obfuscates class names, so the card holding a shared reel
+                // has to be identified by structure. This dumps the ancestor chain of
+                // every large media element as plain text, on screen, so the real
+                // markup can be read instead of guessed at.
+                function dumpStructure() {
+                    if (document.getElementById('onlydms-dump')) {
                         return;
                     }
-                    document.addEventListener('click', function(e) {
-                        const el = e.target instanceof Element ? e.target : null;
-                        if (el && el.closest(SHARED_MEDIA)) {
-                            e.preventDefault();
-                            e.stopPropagation();
+                    const media = [];
+                    document.querySelectorAll('img,video,canvas').forEach(el => {
+                        const r = el.getBoundingClientRect();
+                        if (r.height > 120 && r.width > 80) {
+                            media.push(el);
                         }
-                    }, true);
-                    window.__OnlyDMsClickGuard = true;
+                    });
+
+                    const lines = [];
+                    lines.push('ELEMENTOS DE MIDIA GRANDES: ' + media.length);
+                    media.slice(0, 3).forEach((el, n) => {
+                        const r = el.getBoundingClientRect();
+                        lines.push('');
+                        lines.push('=== MIDIA ' + (n + 1) + ' === ' +
+                            Math.round(r.width) + 'x' + Math.round(r.height) +
+                            '  <' + el.tagName + '>');
+                        let node = el;
+                        for (let up = 0; up < 8 && node; up += 1) {
+                            const box = node.getBoundingClientRect();
+                            let desc = up + ': <' + node.tagName.toLowerCase() + '>';
+                            const role = node.getAttribute('role');
+                            const label = node.getAttribute('aria-label');
+                            const href = node.getAttribute('href');
+                            const tabindex = node.getAttribute('tabindex');
+                            if (role) { desc += ' role=' + role; }
+                            if (href) { desc += ' href=' + href; }
+                            if (label) { desc += ' label=' + label.slice(0, 30); }
+                            if (tabindex !== null) { desc += ' tabindex=' + tabindex; }
+                            desc += '  ' + Math.round(box.width) + 'x' + Math.round(box.height);
+                            lines.push(desc);
+                            node = node.parentElement;
+                        }
+                    });
+
+                    const box = document.createElement('div');
+                    box.id = 'onlydms-dump';
+                    box.style.cssText = 'position:fixed;inset:0;z-index:999999;' +
+                        'background:#000;color:#0f0;font:11px monospace;' +
+                        'padding:12px;overflow:auto;white-space:pre-wrap;';
+                    box.textContent = lines.join('\n');
+                    const close = document.createElement('button');
+                    close.textContent = 'FECHAR';
+                    close.style.cssText = 'position:fixed;top:8px;right:8px;z-index:1000000;' +
+                        'padding:8px 14px;background:#fff;color:#000;border:0;font:12px monospace;';
+                    close.onclick = function() {
+                        box.remove();
+                        close.remove();
+                    };
+                    document.body.appendChild(box);
+                    document.body.appendChild(close);
                 }
 
-                // Messages stream in continuously, so a timer that stops after eight
-                // seconds would miss everything received afterwards. The observer is
-                // event-driven and throttled, which costs less than polling would.
-                function watchThread() {
-                    if (window.__OnlyDMsObserver) {
+                function armDiagnostic() {
+                    if (window.__OnlyDMsDiag) {
                         return;
                     }
-                    let last = 0;
-                    const observer = new MutationObserver(function() {
-                        const now = Date.now();
-                        if (now - last < 300) {
-                            return;
-                        }
-                        last = now;
-                        try {
-                            blockSharedMedia();
-                        } catch (e) {
-                            // never break the thread
-                        }
-                    });
-                    observer.observe(document.documentElement, {
-                        childList: true,
-                        subtree: true
-                    });
-                    window.__OnlyDMsObserver = observer;
+                    window.__OnlyDMsDiag = true;
+                    const btn = document.createElement('button');
+                    btn.textContent = 'DOM';
+                    btn.style.cssText = 'position:fixed;bottom:80px;right:10px;z-index:999998;' +
+                        'padding:10px 14px;background:#d00;color:#fff;border:0;' +
+                        'border-radius:8px;font:12px monospace;';
+                    btn.onclick = dumpStructure;
+                    document.body.appendChild(btn);
                 }
 
                 hideNav();
                 lazyMedia();
                 guardHistory();
-                blockSharedMedia();
-                guardClicks();
-                watchThread();
+                armDiagnostic();
                 if (!window.__OnlyDMsDomGuard) {
                     window.__OnlyDMsDomGuard = setInterval(() => {
                         hideNav();
                         lazyMedia();
-                        blockSharedMedia();
+                        armDiagnostic();
                     }, 2000);
                     setTimeout(() => {
                         if (window.__OnlyDMsDomGuard) {

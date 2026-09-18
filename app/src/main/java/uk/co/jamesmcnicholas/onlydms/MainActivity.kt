@@ -4,9 +4,11 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Bundle
 import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.webkit.CookieManager
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
@@ -24,6 +26,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -84,15 +87,30 @@ class MainActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
-        setContentView(webView)
-        // targetSdk 35+ draws edge to edge, so without this the page's message bar
-        // sits underneath the navigation bar and the keyboard covers the input.
-        ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
+        // targetSdk 35+ draws edge to edge, so the page's message bar would sit under
+        // the navigation bar and the keyboard would cover the input. The insets are
+        // applied as padding on a container rather than on the WebView itself, which
+        // does not honour padding.
+        // The bars are transparent under edge to edge, so the container shows
+        // through behind them. Its colour and the icon shade follow the system theme,
+        // matching the page, which the WebView darkens along with it.
+        val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(if (night) 0xFF000000.toInt() else 0xFFFFFFFF.toInt())
+            addView(webView)
+        }
+        setContentView(root)
+        WindowInsetsControllerCompat(window, root).apply {
+            isAppearanceLightStatusBars = !night
+            isAppearanceLightNavigationBars = !night
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime()
             )
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
-            insets
+            WindowInsetsCompat.CONSUMED
         }
         onBackPressedDispatcher.addCallback(
             this,
@@ -170,6 +188,13 @@ class MainActivity : ComponentActivity() {
                 request: WebResourceRequest?
             ): WebResourceResponse? {
                 val uri = request?.url ?: return super.shouldInterceptRequest(view, request)
+                // Only network schemes are filtered. blob: and data: URLs are created by
+                // the page itself - the voice-note player hands its audio to <audio> as a
+                // blob - and answering them with an empty body silently broke playback.
+                val scheme = uri.scheme.orEmpty().lowercase(Locale.US)
+                if (scheme != "http" && scheme != "https") {
+                    return super.shouldInterceptRequest(view, request)
+                }
                 if (!uri.isSecureHttps()) {
                     return emptyResponse()
                 }
@@ -494,53 +519,74 @@ class MainActivity : ComponentActivity() {
                     host.appendChild(style);
                 }
 
+                // A media element that fills the viewport belongs to a viewer, not to
+                // the thread. Either dimension is enough: a landscape photo in the
+                // viewer is short but spans the full width.
                 function isOverlay(r) {
-                    return r.height > window.innerHeight * 0.75;
+                    return r.height > window.innerHeight * 0.75 ||
+                        r.width > window.innerWidth * 0.9;
                 }
 
-                // The element that owns the tap on a message: a link, a role=button, or
-                // anything with a tabindex, within a few levels. Instagram makes the
-                // whole bubble the tap target, so this is the bubble. It must stay
-                // bubble-sized - the check keeps a mis-detected page-level container
-                // from being treated as one.
-                // Width is the discriminator: the bubble hugs the media horizontally,
-                // while the message row is wider by the sender's avatar - and the row
-                // must never be the scope, or its avatar and "Seen" text would mark a
-                // plain photo as a share. Height stays loose because a share's header
-                // and caption sit above and below the thumbnail inside the bubble.
-                function findOwner(media) {
+                // Climbs from the media to the bubble. Width is the discriminator: the
+                // bubble hugs the media horizontally, while the message row is wider by
+                // the sender's avatar - and the row must never be in scope, or its avatar
+                // and "Seen" text would mark a plain photo as a share. Height stays
+                // loose because a share's header and caption sit above and below the
+                // thumbnail inside the bubble.
+                //
+                // Returns the highest in-bounds ancestor as the scope to classify, and
+                // as the owner to neutralise the first tap target found on the way up,
+                // falling back to the scope itself. The scope does not depend on a tap
+                // target existing: a share with no role or tabindex on its bubble must
+                // still be classified with its header in view.
+                function findScope(media) {
                     const base = media.getBoundingClientRect();
+                    let scope = media.parentElement || media;
+                    let owner = null;
                     let node = media.parentElement;
                     for (let up = 0; up < 7 && node && node !== document.body; up += 1) {
                         const r = node.getBoundingClientRect();
-                        if (r.width > base.width + 24 || r.height > base.height + 140) {
-                            return null;
+                        if (r.width > base.width + 24 || r.height > base.height + 220) {
+                            break;
                         }
-                        const role = node.getAttribute('role');
-                        if (node.tagName === 'A' || role === 'button' || role === 'link' ||
-                            node.hasAttribute('tabindex')) {
-                            return node;
+                        scope = node;
+                        if (!owner) {
+                            const role = node.getAttribute('role');
+                            if (node.tagName === 'A' || role === 'button' || role === 'link' ||
+                                node.hasAttribute('tabindex')) {
+                                owner = node;
+                            }
                         }
                         node = node.parentElement;
                     }
-                    return null;
+                    return { scope: scope, owner: owner || scope };
                 }
 
-                // Media someone recorded and sent - a photo or a video - is bare: nothing
-                // in the bubble but the media itself, at most a duration badge. Content
-                // shared from the feed is never bare: it carries the author's avatar and
-                // name, usually a caption. So the bubble is a share when it holds more
-                // than one image, or any text with letters in it. A play badge or a
-                // <video> element proves nothing either way, since a recorded video has
-                // both, and is deliberately not a signal.
                 // Returns the reason the bubble counts as a share, or null when it is
                 // bare media. The reason is shown in the placeholder for now, so a
                 // wrongly blocked message explains itself in a screenshot.
-                function shareReason(media, owner) {
-                    const scope = owner || media.parentElement || media;
-                    const imgs = scope.querySelectorAll('img').length;
-                    if (imgs > 1) {
-                        return 'img:' + imgs;
+                function shareReason(media, scope) {
+                    // A <video> in a thread is always something someone sent: shared
+                    // reels render as a still thumbnail here and only play in the viewer.
+                    if (media.tagName === 'VIDEO') {
+                        return null;
+                    }
+                    // Only a small, avatar-sized extra image marks a share. Instagram
+                    // stacks a blurred low-resolution copy under photos and video posters
+                    // while they load, and that copy is media-sized - it must not count.
+                    const imgs = scope.querySelectorAll('img');
+                    let avatars = 0;
+                    for (const img of imgs) {
+                        if (img === media) {
+                            continue;
+                        }
+                        const r = img.getBoundingClientRect();
+                        if (r.width > 0 && r.width <= 64 && r.height <= 64) {
+                            avatars += 1;
+                        }
+                    }
+                    if (avatars > 0) {
+                        return 'avatar:' + avatars;
                     }
                     const text = (scope.textContent || '').replace(/\s+/g, ' ').trim();
                     const letters = text.replace(/[^A-Za-z\u00C0-\u024F]/g, '').length;
@@ -558,22 +604,7 @@ class MainActivity : ComponentActivity() {
                 const TAP_EVENTS = ['click', 'pointerdown', 'pointerup', 'mousedown',
                     'mouseup', 'touchstart', 'touchend'];
 
-                function neutralize(media, owner, reason) {
-                    // Without a tap owner, fall back to the wrapper that hugs the media.
-                    let card = owner;
-                    if (!card) {
-                        const base = media.getBoundingClientRect();
-                        card = media;
-                        let node = media.parentElement;
-                        for (let up = 0; up < 6 && node && node !== document.body; up += 1) {
-                            const r = node.getBoundingClientRect();
-                            if (r.height > base.height + 24 || r.width > base.width + 24) {
-                                break;
-                            }
-                            card = node;
-                            node = node.parentElement;
-                        }
-                    }
+                function neutralize(media, card, reason) {
                     if (card.dataset[MARK] === '1') {
                         return;
                     }
@@ -609,14 +640,14 @@ class MainActivity : ComponentActivity() {
                             media.dataset[OK] = '1';
                             return;
                         }
-                        const owner = findOwner(media);
-                        const reason = shareReason(media, owner);
+                        const found = findScope(media);
+                        const reason = shareReason(media, found.scope);
                         if (!reason) {
                             media.dataset[OK] = '1';
                             return;
                         }
                         delete media.dataset[OK];
-                        neutralize(media, owner, reason);
+                        neutralize(media, found.owner, reason);
                     } catch (e) {
                         // never break the thread
                     }

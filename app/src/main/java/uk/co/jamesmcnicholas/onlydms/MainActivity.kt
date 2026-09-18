@@ -2,13 +2,16 @@ package uk.co.jamesmcnicholas.onlydms
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.DownloadManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.Toast
 import android.webkit.CookieManager
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
@@ -222,7 +225,6 @@ class MainActivity : ComponentActivity() {
                 val heavyMatch = HEAVY_PATTERNS.any { pattern -> url.contains(pattern) }
 
                 return if (!allowedHost || heavyMatch) {
-                    reportBlocked(uri)
                     emptyResponse()
                 } else {
                     super.shouldInterceptRequest(view, request)
@@ -238,6 +240,9 @@ class MainActivity : ComponentActivity() {
                 return true
             }
         }
+
+        // Fires when the page hands the WebView a file rather than a document.
+        webView.setDownloadListener { url, _, _, _, _ -> startDownload(url) }
 
         webView.webChromeClient = object : WebChromeClient() {
             /**
@@ -311,26 +316,28 @@ class MainActivity : ComponentActivity() {
 
     private fun handleUrlOverride(view: WebView?, uri: Uri?): Boolean {
         if (uri == null) return true
+        // The page asks for a download by navigating to this scheme (see the long-press
+        // handler in the guard script). It is a request, not a navigation.
+        if (uri.scheme == DOWNLOAD_SCHEME) {
+            uri.getQueryParameter("u")?.let { startDownload(it) }
+            return true
+        }
+        // Instagram's own save button opens the media file's URL. Left alone, the route
+        // guard would treat that as leaving the inbox and bounce back; it is a download.
+        if (uri.isMediaFile()) {
+            startDownload(uri.toString())
+            return true
+        }
         return when {
             uri.isDirectRoute() -> false
             uri.isAuthRoute() -> false
             else -> {
-                reportDiag("NAV bloqueada -> inbox: " + uri.toString().take(60))
                 view?.post { view.loadUrl(MESSAGES_URL) }
                 true
             }
         }
     }
 
-    /** DIAGNOSTICO TEMPORARIO. */
-    private fun reportDiag(line: String) {
-        val safe = line.replace("\\", "").replace("'", "")
-        webView.post {
-            webView.evaluateJavascript(
-                "window.__onlydmsDiag && window.__onlydmsDiag('$safe')", null
-            )
-        }
-    }
 
     private fun enforceRouteGuards(view: WebView?, url: String?) {
         val uri = parseUri(url) ?: return
@@ -365,19 +372,32 @@ class MainActivity : ComponentActivity() {
             pathValue.startsWith("/challenge/")
     }
 
-    /**
-     * DIAGNOSTICO TEMPORARIO. Hands a blocked URL to the page's on-screen panel so
-     * a screenshot shows what the network filter refused. Runs on the WebView's
-     * network thread, hence the post to the main thread.
-     */
-    private fun reportBlocked(uri: Uri) {
-        val label = (uri.host.orEmpty().take(34) + " " + uri.path.orEmpty().takeLast(36))
-            .replace("\\", "").replace("'", "")
-        webView.post {
-            webView.evaluateJavascript(
-                "window.__onlydmsDiag && window.__onlydmsDiag('REDE barrou: $label')", null
-            )
+    /** Saves a media file to the Downloads folder through the system downloader. */
+    private fun startDownload(url: String) {
+        val uri = url.toUri()
+        if (!uri.isSecureHttps()) {
+            Toast.makeText(this, "Este item nao pode ser salvo", Toast.LENGTH_SHORT).show()
+            return
         }
+        val fromPath = uri.lastPathSegment.orEmpty().substringBefore('?')
+        val name = if (fromPath.contains('.')) fromPath else "instagram_" + System.currentTimeMillis()
+        try {
+            val request = DownloadManager.Request(uri)
+                .setTitle(name)
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
+                .addRequestHeader("User-Agent", webView.settings.userAgentString)
+            (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
+            Toast.makeText(this, "Salvando em Downloads", Toast.LENGTH_SHORT).show()
+        } catch (_: Exception) {
+            Toast.makeText(this, "Nao foi possivel salvar", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun Uri.isMediaFile(): Boolean {
+        if (!isSecureHttps()) return false
+        val pathValue = path.orEmpty().lowercase(Locale.US)
+        return MEDIA_EXTENSIONS.any { ext -> pathValue.endsWith(ext) }
     }
 
     private fun enableImages() {
@@ -455,13 +475,7 @@ class MainActivity : ComponentActivity() {
                             try {
                                 if (typeof url === 'string') {
                                     const next = new URL(url, window.location.origin);
-                                    if (window.__onlydmsDiag) {
-                                        window.__onlydmsDiag('HIST ' + fn + ' ' + next.pathname.slice(0, 50));
-                                    }
                                     if (!allowedPath(next.pathname)) {
-                                        if (window.__onlydmsDiag) {
-                                            window.__onlydmsDiag('HIST redirecionado -> inbox');
-                                        }
                                         window.location.href = INBOX;
                                         return;
                                     }
@@ -513,6 +527,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val MESSAGES_URL = "https://www.instagram.com/direct/inbox/"
+        private const val DOWNLOAD_SCHEME = "onlydms-download"
 
         /**
          * Replaces shared reels and posts in a thread with a text placeholder and
@@ -648,7 +663,7 @@ class MainActivity : ComponentActivity() {
                         card.addEventListener(t, swallowTap, { capture: true, passive: false });
                     });
                     const note = document.createElement('div');
-                    note.textContent = 'Conteudo do feed (bloqueado) [' + (reason || '?') + ']';
+                    note.textContent = 'Conteudo do feed (bloqueado)';
                     note.style.cssText = 'display:inline-block;padding:10px 14px;' +
                         'border-radius:16px;background:rgba(127,127,127,0.18);' +
                         'color:#8e8e8e;font-size:14px;line-height:1.3;';
@@ -661,11 +676,29 @@ class MainActivity : ComponentActivity() {
                 // Decides one media element: release it if small or a plain photo,
                 // replace it if it is shared content, leave it hidden if it has no
                 // size yet (the next pass will decide).
+                // A playing video's src is a blob (MediaSource) that cannot be saved.
+                // Its https file URL is visible before playback starts, so it is noted
+                // whenever it is seen and used for the download later.
+                function rememberSource(media) {
+                    if (media.tagName !== 'VIDEO') {
+                        return;
+                    }
+                    let src = media.currentSrc || media.src || '';
+                    if (src.indexOf('https:') !== 0) {
+                        const source = media.querySelector('source[src^="https:"]');
+                        src = source ? source.getAttribute('src') : '';
+                    }
+                    if (src.indexOf('https:') === 0) {
+                        media.dataset.onlydmsSrc = src;
+                    }
+                }
+
                 function evaluate(media) {
                     try {
                         if (!media.isConnected) {
                             return;
                         }
+                        rememberSource(media);
                         const r = media.getBoundingClientRect();
                         if (r.width === 0 && r.height === 0) {
                             return;
@@ -698,74 +731,68 @@ class MainActivity : ComponentActivity() {
                     root.querySelectorAll('img,video').forEach(evaluate);
                 }
 
-                // DIAGNOSTICO TEMPORARIO: painel no topo com o que a rede barrou e o
-                // que os elementos de midia reportaram. Nao intercepta toques.
-                const diagLines = [];
-                function diagPanel() {
-                    let box = document.getElementById('onlydms-diag');
-                    if (!box && document.body) {
-                        box = document.createElement('div');
-                        box.id = 'onlydms-diag';
-                        box.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;' +
-                            'background:rgba(0,0,0,0.82);color:#7f7;font:10px/1.35 monospace;' +
-                            'padding:4px 6px;pointer-events:none;white-space:pre-wrap;' +
-                            'max-height:38vh;overflow:hidden;';
-                        document.body.appendChild(box);
+                // Long press on a released photo or video saves it. The request reaches
+                // the app as a navigation to a private scheme, which the app cancels and
+                // turns into a download - no JavaScript bridge is exposed to the page.
+                const PRESS_MS = 600;
+                let pressTimer = null;
+                let pressStart = null;
+
+                function cancelPress() {
+                    if (pressTimer) {
+                        clearTimeout(pressTimer);
+                        pressTimer = null;
                     }
-                    return box;
+                    pressStart = null;
                 }
-                window.__onlydmsDiag = function(line) {
-                    const stamp = new Date().toTimeString().slice(3, 8);
-                    diagLines.push(stamp + ' ' + line);
-                    while (diagLines.length > 9) {
-                        diagLines.shift();
+
+                function downloadUrlFor(el) {
+                    if (el.tagName === 'VIDEO') {
+                        return el.dataset.onlydmsSrc || '';
                     }
-                    const box = diagPanel();
-                    if (box) {
-                        box.textContent = diagLines.join('\n') || '(sem eventos)';
-                    }
-                };
-                const MEDIA_ERR = ['', 'ABORTED', 'NETWORK', 'DECODE', 'SRC_NOT_SUPPORTED'];
-                function describeMedia(el) {
-                    const src = (el.currentSrc || el.src || '');
-                    const scheme = src.split(':')[0] || '(sem src)';
-                    return el.tagName + ' src=' + scheme + ' rede=' + el.networkState +
-                        ' ready=' + el.readyState;
+                    const src = el.currentSrc || el.src || '';
+                    return src.indexOf('https:') === 0 ? src : '';
                 }
-                document.addEventListener('error', function(e) {
-                    const el = e.target;
-                    if (!el || (el.tagName !== 'VIDEO' && el.tagName !== 'AUDIO')) {
+
+                function requestDownload(el) {
+                    const url = downloadUrlFor(el);
+                    if (!url) {
                         return;
                     }
-                    const code = el.error ? el.error.code : 0;
-                    const msg = el.error && el.error.message ? ' ' + el.error.message.slice(0, 50) : '';
-                    window.__onlydmsDiag('ERRO ' + (MEDIA_ERR[code] || code) + msg + ' | ' + describeMedia(el));
-                }, true);
-                ['play', 'playing', 'stalled', 'suspend', 'abort', 'emptied'].forEach(function(name) {
-                    document.addEventListener(name, function(e) {
-                        const el = e.target;
-                        if (!el || (el.tagName !== 'VIDEO' && el.tagName !== 'AUDIO')) {
-                            return;
-                        }
-                        window.__onlydmsDiag(name.toUpperCase() + ' ' + describeMedia(el));
-                    }, true);
-                });
-                setTimeout(function() { window.__onlydmsDiag('painel ativo ' + location.pathname.slice(0, 30)); }, 1500);
-                // Toques perto de um video: mostra a cadeia de tags do alvo, para ver
-                // o que recebe o toque e se ele chega ao player.
-                document.addEventListener('click', function(e) {
-                    const el = e.target;
-                    if (!el || !el.closest) { return; }
-                    const bubble = el.closest('[role="button"],a,[tabindex]') || el.parentElement;
-                    if (!bubble || !bubble.querySelector('video')) { return; }
-                    let chain = el.tagName;
-                    let n = el.parentElement;
-                    for (let i = 0; i < 3 && n; i += 1) {
-                        chain += '<' + n.tagName + (n.getAttribute('role') ? '.' + n.getAttribute('role') : '');
-                        n = n.parentElement;
+                    window.location.href = 'onlydms-download://save?u=' + encodeURIComponent(url);
+                }
+
+                document.addEventListener('touchstart', function(e) {
+                    const target = e.target && e.target.closest ? e.target.closest('img,video') : null;
+                    cancelPress();
+                    if (!target || target.dataset[OK] !== '1') {
+                        return;
                     }
-                    window.__onlydmsDiag('TOQUE ' + chain + (e.defaultPrevented ? ' (impedido)' : ''));
-                }, true);
+                    const r = target.getBoundingClientRect();
+                    if (r.height < MIN_H || r.width < MIN_W) {
+                        return;
+                    }
+                    const touch = e.touches && e.touches[0];
+                    pressStart = touch ? { x: touch.clientX, y: touch.clientY } : null;
+                    pressTimer = setTimeout(function() {
+                        pressTimer = null;
+                        requestDownload(target);
+                    }, PRESS_MS);
+                }, { capture: true, passive: true });
+
+                document.addEventListener('touchmove', function(e) {
+                    if (!pressStart) {
+                        return;
+                    }
+                    const touch = e.touches && e.touches[0];
+                    if (touch && (Math.abs(touch.clientX - pressStart.x) > 12 ||
+                        Math.abs(touch.clientY - pressStart.y) > 12)) {
+                        cancelPress();
+                    }
+                }, { capture: true, passive: true });
+
+                document.addEventListener('touchend', cancelPress, { capture: true, passive: true });
+                document.addEventListener('touchcancel', cancelPress, { capture: true, passive: true });
 
                 function sweep() {
                     if (!onDirect()) {

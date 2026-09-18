@@ -19,6 +19,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.OnBackPressedCallback
 import androidx.core.net.toUri
 import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import java.io.ByteArrayInputStream
 import java.util.Locale
@@ -83,6 +84,7 @@ class MainActivity : ComponentActivity() {
 
         imagesUnlocked = savedInstanceState?.getBoolean(STATE_IMAGES_UNLOCKED, false) ?: false
         configureWebView()
+        installEarlyGuard()
 
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState)
@@ -276,7 +278,26 @@ class MainActivity : ComponentActivity() {
             setStatusCodeAndReasonPhrase(200, "OK")
         }
 
+    /**
+     * Registers the media guard to run before Instagram's own scripts on every full
+     * navigation, so its stylesheet is in place before the first paint. Without this
+     * the guard would only start at page-finished, after the page has already been
+     * drawn once with every reel visible.
+     *
+     * The script is also evaluated from [reinforceDirectUi] as a fallback for WebView
+     * builds without document-start support; its install flag makes that idempotent.
+     */
+    private fun installEarlyGuard() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
+        WebViewCompat.addDocumentStartJavaScript(
+            webView,
+            EARLY_GUARD_SCRIPT,
+            setOf("https://www.instagram.com", "https://instagram.com")
+        )
+    }
+
     private fun reinforceDirectUi() {
+        webView.evaluateJavascript(EARLY_GUARD_SCRIPT, null)
         val script = """
             (function() {
                 const INBOX = 'https://www.instagram.com/direct/inbox/';
@@ -345,135 +366,13 @@ class MainActivity : ComponentActivity() {
                     });
                 }
 
-                // Shared reels and posts, identified by shape rather than by name.
-                // Instagram obfuscates every class and the card is not a link, so the
-                // one thing that reliably distinguishes it from the rest of a thread is
-                // size: a media element far larger than an avatar or an emoji, wrapped
-                // in a tap target. The viewer overlay is skipped by the viewport check
-                // and prevented from opening by the tap guard instead.
-                const MIN_MEDIA_HEIGHT = 140;
-                const MIN_MEDIA_WIDTH = 90;
-                const MARK = 'onlydmsBlocked';
-
-                function isOverlay(rect) {
-                    return rect.height > window.innerHeight * 0.75;
-                }
-
-                // Climbs from the media element to the wrapper that hugs it - the card -
-                // and then to the element that owns the tap: a link, a role=button, or
-                // anything with a tabindex, whichever comes first.
-                function findCardAndOwner(media) {
-                    const base = media.getBoundingClientRect();
-                    let card = media;
-                    let node = media.parentElement;
-                    for (let up = 0; up < 6 && node && node !== document.body; up += 1) {
-                        const r = node.getBoundingClientRect();
-                        if (r.height > base.height + 80 || r.width > base.width + 80) {
-                            break;
-                        }
-                        card = node;
-                        node = node.parentElement;
-                    }
-                    let owner = card;
-                    node = card;
-                    for (let up = 0; up < 5 && node && node !== document.body; up += 1) {
-                        const role = node.getAttribute('role');
-                        if (node.tagName === 'A' || role === 'button' || role === 'link' ||
-                            node.hasAttribute('tabindex')) {
-                            owner = node;
-                            break;
-                        }
-                        node = node.parentElement;
-                    }
-                    return { card: card, owner: owner };
-                }
-
-                function swallowTap(e) {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                }
-
-                const TAP_EVENTS = ['click', 'pointerdown', 'pointerup', 'mousedown',
-                    'mouseup', 'touchstart', 'touchend'];
-
-                function neutralize(media) {
-                    const found = findCardAndOwner(media);
-                    const card = found.card;
-                    const owner = found.owner;
-                    if (card.dataset[MARK] === '1') {
-                        return;
-                    }
-                    card.dataset[MARK] = '1';
-                    owner.dataset[MARK] = '1';
-
-                    ['href', 'role', 'tabindex'].forEach(a => owner.removeAttribute(a));
-                    TAP_EVENTS.forEach(t => {
-                        owner.addEventListener(t, swallowTap, { capture: true, passive: false });
-                    });
-
-                    const note = document.createElement('div');
-                    note.textContent = 'Video recebido (bloqueado)';
-                    note.style.cssText = 'display:inline-block;padding:10px 14px;' +
-                        'border-radius:16px;background:rgba(127,127,127,0.18);' +
-                        'color:#8e8e8e;font-size:14px;line-height:1.3;';
-                    card.replaceChildren(note);
-                    card.style.cssText += ';height:auto !important;width:auto !important;' +
-                        'min-height:0 !important;aspect-ratio:auto !important;' +
-                        'padding:0 !important;pointer-events:none !important;';
-                }
-
-                function blockSharedMedia() {
-                    if (!window.location.pathname.startsWith('/direct/')) {
-                        return;
-                    }
-                    document.querySelectorAll('img,video').forEach(media => {
-                        try {
-                            const r = media.getBoundingClientRect();
-                            if (r.height < MIN_MEDIA_HEIGHT || r.width < MIN_MEDIA_WIDTH) {
-                                return;
-                            }
-                            if (isOverlay(r)) {
-                                return;
-                            }
-                            neutralize(media);
-                        } catch (e) {
-                            // never break the thread
-                        }
-                    });
-                }
-
-                // Messages keep arriving after load, so this must never expire.
-                function watchThread() {
-                    if (window.__OnlyDMsWatch) {
-                        return;
-                    }
-                    window.__OnlyDMsWatch = true;
-                    let last = 0;
-                    const observer = new MutationObserver(function() {
-                        const now = Date.now();
-                        if (now - last < 250) {
-                            return;
-                        }
-                        last = now;
-                        blockSharedMedia();
-                    });
-                    observer.observe(document.documentElement, {
-                        childList: true,
-                        subtree: true
-                    });
-                    setInterval(blockSharedMedia, 1500);
-                }
-
                 hideNav();
                 lazyMedia();
                 guardHistory();
-                blockSharedMedia();
-                watchThread();
                 if (!window.__OnlyDMsDomGuard) {
                     window.__OnlyDMsDomGuard = setInterval(() => {
                         hideNav();
                         lazyMedia();
-                        blockSharedMedia();
                     }, 2000);
                     setTimeout(() => {
                         if (window.__OnlyDMsDomGuard) {
@@ -489,12 +388,250 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val MESSAGES_URL = "https://www.instagram.com/direct/inbox/"
+
+        /**
+         * Replaces shared reels and posts in a thread with a text placeholder and
+         * keeps them from opening - with no frame in which the reel is visible.
+         *
+         * ### Identification by shape
+         * Instagram obfuscates its class names and the card is not a link, so the one
+         * thing that reliably distinguishes it from the rest of a thread is size: a
+         * media element far larger than an avatar or an emoji.
+         *
+         * ### Why nothing flashes
+         * Two things together. A stylesheet hides every video outright and every image
+         * until it has been checked, so nothing unverified ever reaches the screen.
+         * And the MutationObserver is unthrottled: its callback runs in the same task
+         * that inserted the card, before the browser paints, so a large card is
+         * replaced before it can be drawn and a small avatar is released in the same
+         * breath. The earlier throttled version left a window of up to 250ms, which
+         * is exactly the flash that was visible while scrolling.
+         *
+         * Scoped to /direct/ so the login page keeps its images.
+         */
+        private val EARLY_GUARD_SCRIPT = """
+            (function() {
+                if (window.__OnlyDMsGuard) {
+                    return;
+                }
+                window.__OnlyDMsGuard = true;
+
+                const MIN_H = 140;
+                const MIN_W = 90;
+                const OK = 'onlydmsOk';
+                const MARK = 'onlydmsBlocked';
+
+                function onDirect() {
+                    return window.location.pathname.indexOf('/direct/') === 0;
+                }
+
+                function installStyle() {
+                    if (!onDirect() || document.getElementById('onlydms-guard-style')) {
+                        return;
+                    }
+                    const host = document.head || document.documentElement;
+                    if (!host) {
+                        return;
+                    }
+                    const style = document.createElement('style');
+                    style.id = 'onlydms-guard-style';
+                    style.textContent =
+                        'video{display:none !important;}' +
+                        'img:not([data-onlydms-ok="1"]){visibility:hidden !important;}';
+                    host.appendChild(style);
+                }
+
+                function isOverlay(r) {
+                    return r.height > window.innerHeight * 0.75;
+                }
+
+                // The element that owns the tap on a message: a link, a role=button, or
+                // anything with a tabindex, within a few levels. Instagram makes the
+                // whole bubble the tap target, so this is the bubble. It must stay
+                // bubble-sized - the check keeps a mis-detected page-level container
+                // from being treated as one.
+                // Width is the discriminator: the bubble hugs the media horizontally,
+                // while the message row is wider by the sender's avatar - and the row
+                // must never be the scope, or its avatar and "Seen" text would mark a
+                // plain photo as a share. Height stays loose because a share's header
+                // and caption sit above and below the thumbnail inside the bubble.
+                function findOwner(media) {
+                    const base = media.getBoundingClientRect();
+                    let node = media.parentElement;
+                    for (let up = 0; up < 7 && node && node !== document.body; up += 1) {
+                        const r = node.getBoundingClientRect();
+                        if (r.width > base.width + 24 || r.height > base.height + 140) {
+                            return null;
+                        }
+                        const role = node.getAttribute('role');
+                        if (node.tagName === 'A' || role === 'button' || role === 'link' ||
+                            node.hasAttribute('tabindex')) {
+                            return node;
+                        }
+                        node = node.parentElement;
+                    }
+                    return null;
+                }
+
+                // Media someone recorded and sent - a photo or a video - is bare: nothing
+                // in the bubble but the media itself, at most a duration badge. Content
+                // shared from the feed is never bare: it carries the author's avatar and
+                // name, usually a caption. So the bubble is a share when it holds more
+                // than one image, or any text with letters in it. A play badge or a
+                // <video> element proves nothing either way, since a recorded video has
+                // both, and is deliberately not a signal.
+                function isShare(media, owner) {
+                    const scope = owner || media.parentElement || media;
+                    if (scope.querySelectorAll('img').length > 1) {
+                        return true;
+                    }
+                    const text = (scope.textContent || '').replace(/\s+/g, ' ').trim();
+                    const letters = text.replace(/[^A-Za-z\u00C0-\u024F]/g, '').length;
+                    return letters >= 3;
+                }
+
+                function swallowTap(e) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                }
+
+                const TAP_EVENTS = ['click', 'pointerdown', 'pointerup', 'mousedown',
+                    'mouseup', 'touchstart', 'touchend'];
+
+                function neutralize(media, owner) {
+                    // Without a tap owner, fall back to the wrapper that hugs the media.
+                    let card = owner;
+                    if (!card) {
+                        const base = media.getBoundingClientRect();
+                        card = media;
+                        let node = media.parentElement;
+                        for (let up = 0; up < 6 && node && node !== document.body; up += 1) {
+                            const r = node.getBoundingClientRect();
+                            if (r.height > base.height + 24 || r.width > base.width + 24) {
+                                break;
+                            }
+                            card = node;
+                            node = node.parentElement;
+                        }
+                    }
+                    if (card.dataset[MARK] === '1') {
+                        return;
+                    }
+                    card.dataset[MARK] = '1';
+                    ['href', 'role', 'tabindex'].forEach(a => card.removeAttribute(a));
+                    TAP_EVENTS.forEach(t => {
+                        card.addEventListener(t, swallowTap, { capture: true, passive: false });
+                    });
+                    const note = document.createElement('div');
+                    note.textContent = 'Conteudo do feed (bloqueado)';
+                    note.style.cssText = 'display:inline-block;padding:10px 14px;' +
+                        'border-radius:16px;background:rgba(127,127,127,0.18);' +
+                        'color:#8e8e8e;font-size:14px;line-height:1.3;';
+                    card.replaceChildren(note);
+                    card.style.cssText += ';height:auto !important;width:auto !important;' +
+                        'min-height:0 !important;aspect-ratio:auto !important;' +
+                        'padding:0 !important;pointer-events:none !important;';
+                }
+
+                // Decides one media element: release it if small or a plain photo,
+                // replace it if it is shared content, leave it hidden if it has no
+                // size yet (the next pass will decide).
+                function evaluate(media) {
+                    try {
+                        if (!media.isConnected) {
+                            return;
+                        }
+                        const r = media.getBoundingClientRect();
+                        if (r.width === 0 && r.height === 0) {
+                            return;
+                        }
+                        if (r.height < MIN_H || r.width < MIN_W || isOverlay(r)) {
+                            media.dataset[OK] = '1';
+                            return;
+                        }
+                        const owner = findOwner(media);
+                        if (!isShare(media, owner)) {
+                            media.dataset[OK] = '1';
+                            return;
+                        }
+                        delete media.dataset[OK];
+                        neutralize(media, owner);
+                    } catch (e) {
+                        // never break the thread
+                    }
+                }
+
+                function evaluateWithin(root) {
+                    if (!root || root.nodeType !== 1) {
+                        return;
+                    }
+                    const tag = root.tagName;
+                    if (tag === 'IMG' || tag === 'VIDEO') {
+                        evaluate(root);
+                    }
+                    root.querySelectorAll('img,video').forEach(evaluate);
+                }
+
+                function sweep() {
+                    if (!onDirect()) {
+                        return;
+                    }
+                    installStyle();
+                    evaluateWithin(document.body);
+                }
+
+                function watch() {
+                    const observer = new MutationObserver(function(records) {
+                        if (!onDirect()) {
+                            return;
+                        }
+                        installStyle();
+                        for (const rec of records) {
+                            if (rec.type === 'attributes') {
+                                evaluate(rec.target);
+                                continue;
+                            }
+                            rec.addedNodes.forEach(evaluateWithin);
+                            // A share header can arrive after its thumbnail. Re-check the
+                            // media around the insertion point, bounded to bubble-sized
+                            // containers so a page-level container is never rescanned.
+                            const t = rec.target;
+                            if (t && t.nodeType === 1 && t.getBoundingClientRect().height < 900) {
+                                evaluateWithin(t);
+                            }
+                        }
+                    });
+                    observer.observe(document.documentElement, {
+                        childList: true,
+                        subtree: true,
+                        attributes: true,
+                        attributeFilter: ['src', 'poster']
+                    });
+                    // An image acquires its size when it loads; loading is not a
+                    // mutation, so it is caught here instead.
+                    document.addEventListener('load', function(e) {
+                        if (e.target && e.target.tagName === 'IMG') {
+                            evaluate(e.target);
+                        }
+                    }, true);
+                    setInterval(sweep, 500);
+                }
+
+                installStyle();
+                watch();
+                if (document.readyState === 'loading') {
+                    document.addEventListener('DOMContentLoaded', sweep, { once: true });
+                } else {
+                    sweep();
+                }
+            })();
+        """.trimIndent()
+
         private const val STATE_IMAGES_UNLOCKED = "state_images_unlocked"
+        // Video formats were on this list in the original app, which is why no video
+        // ever played. They are off it now so recorded videos sent in a thread work;
+        // shared reels are handled in the DOM by the early guard instead.
         private val HEAVY_PATTERNS = listOf(
-            ".mp4",
-            ".m3u8",
-            ".ts",
-            ".webm",
             ".woff",
             ".woff2",
             ".ttf",

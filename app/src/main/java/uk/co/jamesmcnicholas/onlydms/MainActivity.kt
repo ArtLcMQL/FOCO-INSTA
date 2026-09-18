@@ -1,11 +1,14 @@
 package uk.co.jamesmcnicholas.onlydms
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -17,7 +20,10 @@ import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.OnBackPressedCallback
+import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -29,6 +35,17 @@ class MainActivity : ComponentActivity() {
     private lateinit var webView: WebView
     private var imagesUnlocked = false
     private var fileCallback: ValueCallback<Array<Uri>>? = null
+
+    /** The page's microphone request, held while the system permission dialog is up. */
+    private var pendingPermission: PermissionRequest? = null
+
+    private val microphoneLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val request = pendingPermission ?: return@registerForActivityResult
+        pendingPermission = null
+        if (granted) request.grant(request.resources) else request.deny()
+    }
 
     private val mediaPickerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -68,6 +85,15 @@ class MainActivity : ComponentActivity() {
             )
         }
         setContentView(webView)
+        // targetSdk 35+ draws edge to edge, so without this the page's message bar
+        // sits underneath the navigation bar and the keyboard covers the input.
+        ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime()
+            )
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
         onBackPressedDispatcher.addCallback(
             this,
             object : OnBackPressedCallback(true) {
@@ -98,7 +124,9 @@ class MainActivity : ComponentActivity() {
         with(webView.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
-            mediaPlaybackRequiresUserGesture = true
+            // Voice notes are started by the page after the tap, not during it, and
+            // the stricter setting refused them.
+            mediaPlaybackRequiresUserGesture = false
             cacheMode = WebSettings.LOAD_DEFAULT
             loadsImagesAutomatically = imagesUnlocked
 
@@ -172,6 +200,31 @@ class MainActivity : ComponentActivity() {
         }
 
         webView.webChromeClient = object : WebChromeClient() {
+            /**
+             * Recording a voice note makes the page ask for the microphone. WebView
+             * denies every such request unless the app answers it, and answering means
+             * holding the system permission first; the request is parked while the
+             * dialog is up and settled in [microphoneLauncher].
+             */
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                request ?: return
+                val wantsMic = request.resources.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)
+                if (!wantsMic) {
+                    request.deny()
+                    return
+                }
+                val held = ContextCompat.checkSelfPermission(
+                    this@MainActivity, Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (held) {
+                    request.grant(request.resources)
+                } else {
+                    pendingPermission?.deny()
+                    pendingPermission = request
+                    microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            }
+
             override fun onShowFileChooser(
                 view: WebView?,
                 filePathCallback: ValueCallback<Array<Uri>>?,
@@ -436,8 +489,8 @@ class MainActivity : ComponentActivity() {
                     const style = document.createElement('style');
                     style.id = 'onlydms-guard-style';
                     style.textContent =
-                        'video{display:none !important;}' +
-                        'img:not([data-onlydms-ok="1"]){visibility:hidden !important;}';
+                        'img:not([data-onlydms-ok="1"]),' +
+                        'video:not([data-onlydms-ok="1"]){visibility:hidden !important;}';
                     host.appendChild(style);
                 }
 
@@ -480,14 +533,21 @@ class MainActivity : ComponentActivity() {
                 // than one image, or any text with letters in it. A play badge or a
                 // <video> element proves nothing either way, since a recorded video has
                 // both, and is deliberately not a signal.
-                function isShare(media, owner) {
+                // Returns the reason the bubble counts as a share, or null when it is
+                // bare media. The reason is shown in the placeholder for now, so a
+                // wrongly blocked message explains itself in a screenshot.
+                function shareReason(media, owner) {
                     const scope = owner || media.parentElement || media;
-                    if (scope.querySelectorAll('img').length > 1) {
-                        return true;
+                    const imgs = scope.querySelectorAll('img').length;
+                    if (imgs > 1) {
+                        return 'img:' + imgs;
                     }
                     const text = (scope.textContent || '').replace(/\s+/g, ' ').trim();
                     const letters = text.replace(/[^A-Za-z\u00C0-\u024F]/g, '').length;
-                    return letters >= 3;
+                    if (letters >= 3) {
+                        return 'txt:' + text.slice(0, 40);
+                    }
+                    return null;
                 }
 
                 function swallowTap(e) {
@@ -498,7 +558,7 @@ class MainActivity : ComponentActivity() {
                 const TAP_EVENTS = ['click', 'pointerdown', 'pointerup', 'mousedown',
                     'mouseup', 'touchstart', 'touchend'];
 
-                function neutralize(media, owner) {
+                function neutralize(media, owner, reason) {
                     // Without a tap owner, fall back to the wrapper that hugs the media.
                     let card = owner;
                     if (!card) {
@@ -523,7 +583,7 @@ class MainActivity : ComponentActivity() {
                         card.addEventListener(t, swallowTap, { capture: true, passive: false });
                     });
                     const note = document.createElement('div');
-                    note.textContent = 'Conteudo do feed (bloqueado)';
+                    note.textContent = 'Conteudo do feed (bloqueado) [' + (reason || '?') + ']';
                     note.style.cssText = 'display:inline-block;padding:10px 14px;' +
                         'border-radius:16px;background:rgba(127,127,127,0.18);' +
                         'color:#8e8e8e;font-size:14px;line-height:1.3;';
@@ -550,12 +610,13 @@ class MainActivity : ComponentActivity() {
                             return;
                         }
                         const owner = findOwner(media);
-                        if (!isShare(media, owner)) {
+                        const reason = shareReason(media, owner);
+                        if (!reason) {
                             media.dataset[OK] = '1';
                             return;
                         }
                         delete media.dataset[OK];
-                        neutralize(media, owner);
+                        neutralize(media, owner, reason);
                     } catch (e) {
                         // never break the thread
                     }

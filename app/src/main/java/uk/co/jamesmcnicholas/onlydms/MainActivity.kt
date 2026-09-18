@@ -148,10 +148,14 @@ class MainActivity : ComponentActivity() {
             cacheMode = WebSettings.LOAD_DEFAULT
             loadsImagesAutomatically = imagesUnlocked
 
+            // The stock string carries "; wv", which marks the client as an embedded
+            // WebView, and Instagram serves embedded browsers a reduced experience in
+            // some flows. Presented as plain Chrome it gets the same page Chrome gets.
             val defaultUserAgent = userAgentString.orEmpty()
-            if (!defaultUserAgent.contains("OnlyDMs/1.0")) {
-                userAgentString = "$defaultUserAgent OnlyDMs/1.0".trim()
-            }
+            userAgentString = defaultUserAgent
+                .replace("; wv)", ")")
+                .replace(" OnlyDMs/1.0", "")
+                .trim()
         }
 
         if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
@@ -208,6 +212,7 @@ class MainActivity : ComponentActivity() {
                 val heavyMatch = HEAVY_PATTERNS.any { pattern -> url.contains(pattern) }
 
                 return if (!allowedHost || heavyMatch) {
+                    reportBlocked(uri)
                     emptyResponse()
                 } else {
                     super.shouldInterceptRequest(view, request)
@@ -337,6 +342,21 @@ class MainActivity : ComponentActivity() {
         return pathValue.startsWith("/accounts/login") ||
             pathValue.startsWith("/accounts/onetap") ||
             pathValue.startsWith("/challenge/")
+    }
+
+    /**
+     * DIAGNOSTICO TEMPORARIO. Hands a blocked URL to the page's on-screen panel so
+     * a screenshot shows what the network filter refused. Runs on the WebView's
+     * network thread, hence the post to the main thread.
+     */
+    private fun reportBlocked(uri: Uri) {
+        val label = (uri.host.orEmpty() + uri.path.orEmpty()).takeLast(70)
+            .replace("\\", "").replace("'", "")
+        webView.post {
+            webView.evaluateJavascript(
+                "window.__onlydmsDiag && window.__onlydmsDiag('REDE barrou: $label')", null
+            )
+        }
     }
 
     private fun enableImages() {
@@ -663,6 +683,60 @@ class MainActivity : ComponentActivity() {
                     }
                     root.querySelectorAll('img,video').forEach(evaluate);
                 }
+
+                // DIAGNOSTICO TEMPORARIO: painel no topo com o que a rede barrou e o
+                // que os elementos de midia reportaram. Nao intercepta toques.
+                const diagLines = [];
+                function diagPanel() {
+                    let box = document.getElementById('onlydms-diag');
+                    if (!box && document.body) {
+                        box = document.createElement('div');
+                        box.id = 'onlydms-diag';
+                        box.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;' +
+                            'background:rgba(0,0,0,0.82);color:#7f7;font:10px/1.35 monospace;' +
+                            'padding:4px 6px;pointer-events:none;white-space:pre-wrap;' +
+                            'max-height:38vh;overflow:hidden;';
+                        document.body.appendChild(box);
+                    }
+                    return box;
+                }
+                window.__onlydmsDiag = function(line) {
+                    const stamp = new Date().toTimeString().slice(3, 8);
+                    diagLines.push(stamp + ' ' + line);
+                    while (diagLines.length > 9) {
+                        diagLines.shift();
+                    }
+                    const box = diagPanel();
+                    if (box) {
+                        box.textContent = diagLines.join('\n') || '(sem eventos)';
+                    }
+                };
+                const MEDIA_ERR = ['', 'ABORTED', 'NETWORK', 'DECODE', 'SRC_NOT_SUPPORTED'];
+                function describeMedia(el) {
+                    const src = (el.currentSrc || el.src || '');
+                    const scheme = src.split(':')[0] || '(sem src)';
+                    return el.tagName + ' src=' + scheme + ' rede=' + el.networkState +
+                        ' ready=' + el.readyState;
+                }
+                document.addEventListener('error', function(e) {
+                    const el = e.target;
+                    if (!el || (el.tagName !== 'VIDEO' && el.tagName !== 'AUDIO')) {
+                        return;
+                    }
+                    const code = el.error ? el.error.code : 0;
+                    const msg = el.error && el.error.message ? ' ' + el.error.message.slice(0, 50) : '';
+                    window.__onlydmsDiag('ERRO ' + (MEDIA_ERR[code] || code) + msg + ' | ' + describeMedia(el));
+                }, true);
+                ['play', 'playing', 'stalled', 'suspend', 'abort', 'emptied'].forEach(function(name) {
+                    document.addEventListener(name, function(e) {
+                        const el = e.target;
+                        if (!el || (el.tagName !== 'VIDEO' && el.tagName !== 'AUDIO')) {
+                            return;
+                        }
+                        window.__onlydmsDiag(name.toUpperCase() + ' ' + describeMedia(el));
+                    }, true);
+                });
+                setTimeout(function() { window.__onlydmsDiag('painel ativo ' + location.pathname.slice(0, 30)); }, 1500);
 
                 function sweep() {
                     if (!onDirect()) {

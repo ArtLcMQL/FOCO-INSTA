@@ -345,13 +345,89 @@ class MainActivity : ComponentActivity() {
                     });
                 }
 
+                const SHARED_MEDIA =
+                    'a[href*="/reel/"],a[href*="/reels/"],a[href*="/p/"],' +
+                    'a[href*="/tv/"],a[href*="/stories/"]';
+
+                // Instagram obfuscates its class names, so the href is the only stable
+                // anchor: a shared reel or post is always a link to /reel/ or /p/.
+                // The card is replaced outright rather than merely hidden, so the
+                // thread still reads as a conversation.
+                function blockSharedMedia() {
+                    document.querySelectorAll(SHARED_MEDIA).forEach(el => {
+                        if (el.dataset.onlydmsBlocked === '1') {
+                            return;
+                        }
+                        el.dataset.onlydmsBlocked = '1';
+                        el.removeAttribute('href');
+                        el.removeAttribute('role');
+                        el.style.pointerEvents = 'none';
+                        el.style.cursor = 'default';
+                        const note = document.createElement('span');
+                        note.textContent = 'Video recebido (bloqueado)';
+                        note.style.cssText = 'display:inline-block;padding:10px 14px;' +
+                            'border-radius:16px;background:rgba(127,127,127,0.18);' +
+                            'color:#8e8e8e;font-size:14px;line-height:1.3;';
+                        el.replaceChildren(note);
+                    });
+                }
+
+                // Second line of defence. Instagram opens the reel viewer as an overlay
+                // without changing the URL, so the route guard never sees it; swallowing
+                // the click in the capture phase stops it before the site's own handler
+                // runs, even on a card this pass has not rewritten yet.
+                function guardClicks() {
+                    if (window.__OnlyDMsClickGuard) {
+                        return;
+                    }
+                    document.addEventListener('click', function(e) {
+                        const el = e.target instanceof Element ? e.target : null;
+                        if (el && el.closest(SHARED_MEDIA)) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                        }
+                    }, true);
+                    window.__OnlyDMsClickGuard = true;
+                }
+
+                // Messages stream in continuously, so a timer that stops after eight
+                // seconds would miss everything received afterwards. The observer is
+                // event-driven and throttled, which costs less than polling would.
+                function watchThread() {
+                    if (window.__OnlyDMsObserver) {
+                        return;
+                    }
+                    let last = 0;
+                    const observer = new MutationObserver(function() {
+                        const now = Date.now();
+                        if (now - last < 300) {
+                            return;
+                        }
+                        last = now;
+                        try {
+                            blockSharedMedia();
+                        } catch (e) {
+                            // never break the thread
+                        }
+                    });
+                    observer.observe(document.documentElement, {
+                        childList: true,
+                        subtree: true
+                    });
+                    window.__OnlyDMsObserver = observer;
+                }
+
                 hideNav();
                 lazyMedia();
                 guardHistory();
+                blockSharedMedia();
+                guardClicks();
+                watchThread();
                 if (!window.__OnlyDMsDomGuard) {
                     window.__OnlyDMsDomGuard = setInterval(() => {
                         hideNav();
                         lazyMedia();
+                        blockSharedMedia();
                     }, 2000);
                     setTimeout(() => {
                         if (window.__OnlyDMsDomGuard) {

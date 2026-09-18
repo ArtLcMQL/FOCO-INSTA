@@ -617,23 +617,11 @@ class MainActivity : ComponentActivity() {
                 // author header. A recorded video's bubble holds no letters and no
                 // avatar-sized image, so it passes.
                 function shareReason(media, scope) {
-                    // Only a small, avatar-sized extra image marks a share. Instagram
-                    // stacks a blurred low-resolution copy under photos and video posters
-                    // while they load, and that copy is media-sized - it must not count.
-                    const imgs = scope.querySelectorAll('img');
-                    let avatars = 0;
-                    for (const img of imgs) {
-                        if (img === media) {
-                            continue;
-                        }
-                        const r = img.getBoundingClientRect();
-                        if (r.width > 0 && r.width <= 64 && r.height <= 64) {
-                            avatars += 1;
-                        }
-                    }
-                    if (avatars > 0) {
-                        return 'avatar:' + avatars;
-                    }
+                    // The author's name is the one signal a share always carries and
+                    // recorded media never does. Counting extra images was tried and
+                    // dropped: Instagram draws emoji reactions as tiny <img> elements, so
+                    // a heart on a recorded video read as an author avatar and the whole
+                    // bubble was neutralised - which is what made videos untappable.
                     const text = (scope.textContent || '').replace(/\s+/g, ' ').trim();
                     const letters = text.replace(/[^A-Za-z\u00C0-\u024F]/g, '').length;
                     if (letters >= 3) {

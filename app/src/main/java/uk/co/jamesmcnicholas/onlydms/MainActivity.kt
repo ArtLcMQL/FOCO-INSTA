@@ -206,7 +206,17 @@ class MainActivity : ComponentActivity() {
                 val host = uri.host.orEmpty().lowercase(Locale.US)
                 val allowedHost = host.contains("instagram.com") ||
                     host.contains("cdninstagram") ||
-                    host.contains("fbcdn.net")
+                    host.contains("fbcdn.net") ||
+                    host.contains("fbsbx.com")
+
+                // A media file is never a tracker, so it is let through on its extension
+                // alone. The voice-note .ogg files come from cdn.fbsbx.com, a host the
+                // allowlist did not know, which is how every audio clip was refused.
+                val pathValue = uri.path.orEmpty().lowercase(Locale.US)
+                val isMediaFile = MEDIA_EXTENSIONS.any { ext -> pathValue.endsWith(ext) }
+                if (isMediaFile) {
+                    return super.shouldInterceptRequest(view, request)
+                }
 
                 val url = uri.toString().lowercase(Locale.US)
                 val heavyMatch = HEAVY_PATTERNS.any { pattern -> url.contains(pattern) }
@@ -305,9 +315,20 @@ class MainActivity : ComponentActivity() {
             uri.isDirectRoute() -> false
             uri.isAuthRoute() -> false
             else -> {
+                reportDiag("NAV bloqueada -> inbox: " + uri.toString().take(60))
                 view?.post { view.loadUrl(MESSAGES_URL) }
                 true
             }
+        }
+    }
+
+    /** DIAGNOSTICO TEMPORARIO. */
+    private fun reportDiag(line: String) {
+        val safe = line.replace("\\", "").replace("'", "")
+        webView.post {
+            webView.evaluateJavascript(
+                "window.__onlydmsDiag && window.__onlydmsDiag('$safe')", null
+            )
         }
     }
 
@@ -350,7 +371,7 @@ class MainActivity : ComponentActivity() {
      * network thread, hence the post to the main thread.
      */
     private fun reportBlocked(uri: Uri) {
-        val label = (uri.host.orEmpty() + uri.path.orEmpty()).takeLast(70)
+        val label = (uri.host.orEmpty().take(34) + " " + uri.path.orEmpty().takeLast(36))
             .replace("\\", "").replace("'", "")
         webView.post {
             webView.evaluateJavascript(
@@ -434,7 +455,13 @@ class MainActivity : ComponentActivity() {
                             try {
                                 if (typeof url === 'string') {
                                     const next = new URL(url, window.location.origin);
+                                    if (window.__onlydmsDiag) {
+                                        window.__onlydmsDiag('HIST ' + fn + ' ' + next.pathname.slice(0, 50));
+                                    }
                                     if (!allowedPath(next.pathname)) {
+                                        if (window.__onlydmsDiag) {
+                                            window.__onlydmsDiag('HIST redirecionado -> inbox');
+                                        }
                                         window.location.href = INBOX;
                                         return;
                                     }
@@ -585,12 +612,11 @@ class MainActivity : ComponentActivity() {
                 // Returns the reason the bubble counts as a share, or null when it is
                 // bare media. The reason is shown in the placeholder for now, so a
                 // wrongly blocked message explains itself in a screenshot.
+                // Applies to <video> too: a shared reel can arrive as a <video> with a
+                // preview, and what distinguishes it from a recorded video is the same
+                // author header. A recorded video's bubble holds no letters and no
+                // avatar-sized image, so it passes.
                 function shareReason(media, scope) {
-                    // A <video> in a thread is always something someone sent: shared
-                    // reels render as a still thumbnail here and only play in the viewer.
-                    if (media.tagName === 'VIDEO') {
-                        return null;
-                    }
                     // Only a small, avatar-sized extra image marks a share. Instagram
                     // stacks a blurred low-resolution copy under photos and video posters
                     // while they load, and that copy is media-sized - it must not count.
@@ -737,6 +763,21 @@ class MainActivity : ComponentActivity() {
                     }, true);
                 });
                 setTimeout(function() { window.__onlydmsDiag('painel ativo ' + location.pathname.slice(0, 30)); }, 1500);
+                // Toques perto de um video: mostra a cadeia de tags do alvo, para ver
+                // o que recebe o toque e se ele chega ao player.
+                document.addEventListener('click', function(e) {
+                    const el = e.target;
+                    if (!el || !el.closest) { return; }
+                    const bubble = el.closest('[role="button"],a,[tabindex]') || el.parentElement;
+                    if (!bubble || !bubble.querySelector('video')) { return; }
+                    let chain = el.tagName;
+                    let n = el.parentElement;
+                    for (let i = 0; i < 3 && n; i += 1) {
+                        chain += '<' + n.tagName + (n.getAttribute('role') ? '.' + n.getAttribute('role') : '');
+                        n = n.parentElement;
+                    }
+                    window.__onlydmsDiag('TOQUE ' + chain + (e.defaultPrevented ? ' (impedido)' : ''));
+                }, true);
 
                 function sweep() {
                     if (!onDirect()) {
@@ -797,6 +838,12 @@ class MainActivity : ComponentActivity() {
         // Video formats were on this list in the original app, which is why no video
         // ever played. They are off it now so recorded videos sent in a thread work;
         // shared reels are handled in the DOM by the early guard instead.
+        private val MEDIA_EXTENSIONS = listOf(
+            ".ogg", ".oga", ".opus", ".m4a", ".aac", ".mp3", ".wav",
+            ".mp4", ".webm", ".m3u8", ".mpd", ".ts",
+            ".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"
+        )
+
         private val HEAVY_PATTERNS = listOf(
             ".woff",
             ".woff2",

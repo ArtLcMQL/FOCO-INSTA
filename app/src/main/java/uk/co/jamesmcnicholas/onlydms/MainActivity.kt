@@ -773,21 +773,39 @@ class MainActivity : ComponentActivity() {
                 // The element under the finger is often a transparent tap layer, not the
                 // media itself, so the media is looked up from the touch point, piercing
                 // overlays, with the enclosing bubble as a fallback.
+                // A video sits under its poster image in the stack until it plays, so the
+                // video is preferred wherever one is present: in the stack itself, or in
+                // the bubble around an image that turned out to be a poster.
+                function videoNear(el) {
+                    if (!el || !el.closest) {
+                        return null;
+                    }
+                    const bubble = el.closest('[role="button"],a,[tabindex]') || el.parentElement;
+                    return bubble ? bubble.querySelector('video') : null;
+                }
+
                 function mediaAt(x, y, target) {
                     const stack = document.elementsFromPoint ? document.elementsFromPoint(x, y) : [];
+                    let firstImage = null;
                     for (const el of stack) {
-                        if (el.tagName === 'IMG' || el.tagName === 'VIDEO') {
+                        if (el.tagName === 'VIDEO') {
                             return el;
                         }
+                        if (el.tagName === 'IMG' && !firstImage) {
+                            firstImage = el;
+                        }
+                    }
+                    if (firstImage) {
+                        return videoNear(firstImage) || firstImage;
                     }
                     if (target && target.closest) {
                         const direct = target.closest('img,video');
                         if (direct) {
-                            return direct;
+                            return direct.tagName === 'VIDEO' ? direct : (videoNear(direct) || direct);
                         }
                         const bubble = target.closest('[role="button"],a,[tabindex]');
                         if (bubble) {
-                            return bubble.querySelector('video,img');
+                            return bubble.querySelector('video') || bubble.querySelector('img');
                         }
                     }
                     return null;

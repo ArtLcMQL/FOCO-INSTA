@@ -12,6 +12,7 @@ import android.os.Environment
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.Toast
+import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
@@ -246,6 +247,19 @@ class MainActivity : ComponentActivity() {
 
         webView.webChromeClient = object : WebChromeClient() {
             /**
+             * The long-press handler in the guard script asks for a download by logging
+             * a line with a private prefix. A console message needs no user activation
+             * and no JavaScript bridge, unlike a navigation to a custom scheme, which
+             * Chromium drops when it happens while the finger is still down.
+             */
+            override fun onConsoleMessage(message: ConsoleMessage?): Boolean {
+                val text = message?.message() ?: return super.onConsoleMessage(message)
+                if (!text.startsWith(DOWNLOAD_PREFIX)) return super.onConsoleMessage(message)
+                startDownload(text.removePrefix(DOWNLOAD_PREFIX).trim())
+                return true
+            }
+
+            /**
              * Recording a voice note makes the page ask for the microphone. WebView
              * denies every such request unless the app answers it, and answering means
              * holding the system permission first; the request is parked while the
@@ -316,12 +330,6 @@ class MainActivity : ComponentActivity() {
 
     private fun handleUrlOverride(view: WebView?, uri: Uri?): Boolean {
         if (uri == null) return true
-        // The page asks for a download by navigating to this scheme (see the long-press
-        // handler in the guard script). It is a request, not a navigation.
-        if (uri.scheme == DOWNLOAD_SCHEME) {
-            uri.getQueryParameter("u")?.let { startDownload(it) }
-            return true
-        }
         // Instagram's own save button opens the media file's URL. Left alone, the route
         // guard would treat that as leaving the inbox and bounce back; it is a download.
         if (uri.isMediaFile()) {
@@ -527,7 +535,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val MESSAGES_URL = "https://www.instagram.com/direct/inbox/"
-        private const val DOWNLOAD_SCHEME = "onlydms-download"
+        private const val DOWNLOAD_PREFIX = "onlydms-download:"
 
         /**
          * Replaces shared reels and posts in a thread with a text placeholder and
@@ -759,21 +767,51 @@ class MainActivity : ComponentActivity() {
                     if (!url) {
                         return;
                     }
-                    window.location.href = 'onlydms-download://save?u=' + encodeURIComponent(url);
+                    console.log('onlydms-download:' + url);
+                }
+
+                // The element under the finger is often a transparent tap layer, not the
+                // media itself, so the media is looked up from the touch point, piercing
+                // overlays, with the enclosing bubble as a fallback.
+                function mediaAt(x, y, target) {
+                    const stack = document.elementsFromPoint ? document.elementsFromPoint(x, y) : [];
+                    for (const el of stack) {
+                        if (el.tagName === 'IMG' || el.tagName === 'VIDEO') {
+                            return el;
+                        }
+                    }
+                    if (target && target.closest) {
+                        const direct = target.closest('img,video');
+                        if (direct) {
+                            return direct;
+                        }
+                        const bubble = target.closest('[role="button"],a,[tabindex]');
+                        if (bubble) {
+                            return bubble.querySelector('video,img');
+                        }
+                    }
+                    return null;
+                }
+
+                function isSaveable(el) {
+                    if (!el || el.dataset[OK] !== '1') {
+                        return false;
+                    }
+                    const r = el.getBoundingClientRect();
+                    return r.height >= MIN_H && r.width >= MIN_W;
                 }
 
                 document.addEventListener('touchstart', function(e) {
-                    const target = e.target && e.target.closest ? e.target.closest('img,video') : null;
                     cancelPress();
-                    if (!target || target.dataset[OK] !== '1') {
-                        return;
-                    }
-                    const r = target.getBoundingClientRect();
-                    if (r.height < MIN_H || r.width < MIN_W) {
-                        return;
-                    }
                     const touch = e.touches && e.touches[0];
-                    pressStart = touch ? { x: touch.clientX, y: touch.clientY } : null;
+                    if (!touch) {
+                        return;
+                    }
+                    const target = mediaAt(touch.clientX, touch.clientY, e.target);
+                    if (!isSaveable(target)) {
+                        return;
+                    }
+                    pressStart = { x: touch.clientX, y: touch.clientY };
                     pressTimer = setTimeout(function() {
                         pressTimer = null;
                         requestDownload(target);

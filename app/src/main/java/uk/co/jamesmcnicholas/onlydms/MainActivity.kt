@@ -687,6 +687,20 @@ class MainActivity : ComponentActivity() {
                 // A playing video's src is a blob (MediaSource) that cannot be saved.
                 // Its https file URL is visible before playback starts, so it is noted
                 // whenever it is seen and used for the download later.
+                // Every video seen with an https file URL is recorded twice: on the
+                // element, and in a map keyed by its poster image. The map is what the
+                // long press relies on, because the cover the user presses is a separate
+                // <img> that shares the video's poster - and the <video> may live in a
+                // different container, or have been torn down and rebuilt as a blob.
+                const videoByPoster = new Map();
+
+                function posterKey(url) {
+                    if (!url) {
+                        return '';
+                    }
+                    return String(url).split('?')[0].split('#')[0].split('/').pop();
+                }
+
                 function rememberSource(media) {
                     if (media.tagName !== 'VIDEO') {
                         return;
@@ -696,8 +710,13 @@ class MainActivity : ComponentActivity() {
                         const source = media.querySelector('source[src^="https:"]');
                         src = source ? source.getAttribute('src') : '';
                     }
-                    if (src.indexOf('https:') === 0) {
-                        media.dataset.onlydmsSrc = src;
+                    if (src.indexOf('https:') !== 0) {
+                        return;
+                    }
+                    media.dataset.onlydmsSrc = src;
+                    const key = posterKey(media.getAttribute('poster') || media.poster);
+                    if (key) {
+                        videoByPoster.set(key, src);
                     }
                 }
 
@@ -756,9 +775,15 @@ class MainActivity : ComponentActivity() {
 
                 function downloadUrlFor(el) {
                     if (el.tagName === 'VIDEO') {
-                        return el.dataset.onlydmsSrc || '';
+                        return el.dataset.onlydmsSrc ||
+                            videoByPoster.get(posterKey(el.getAttribute('poster') || el.poster)) || '';
                     }
                     const src = el.currentSrc || el.src || '';
+                    // An image that is some video's poster stands for that video.
+                    const linked = videoByPoster.get(posterKey(src));
+                    if (linked) {
+                        return linked;
+                    }
                     return src.indexOf('https:') === 0 ? src : '';
                 }
 
@@ -777,11 +802,23 @@ class MainActivity : ComponentActivity() {
                 // video is preferred wherever one is present: in the stack itself, or in
                 // the bubble around an image that turned out to be a poster.
                 function videoNear(el) {
-                    if (!el || !el.closest) {
+                    if (!el || !el.getBoundingClientRect) {
                         return null;
                     }
-                    const bubble = el.closest('[role="button"],a,[tabindex]') || el.parentElement;
-                    return bubble ? bubble.querySelector('video') : null;
+                    const base = el.getBoundingClientRect();
+                    let node = el.parentElement;
+                    for (let up = 0; up < 6 && node && node !== document.body; up += 1) {
+                        const r = node.getBoundingClientRect();
+                        if (r.height > base.height + 400) {
+                            break;
+                        }
+                        const video = node.querySelector('video');
+                        if (video) {
+                            return video;
+                        }
+                        node = node.parentElement;
+                    }
+                    return null;
                 }
 
                 function mediaAt(x, y, target) {

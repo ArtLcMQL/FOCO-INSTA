@@ -216,6 +216,7 @@ class MainActivity : ComponentActivity() {
                 // A media file is never a tracker, so it is let through on its extension
                 // alone. The voice-note .ogg files come from cdn.fbsbx.com, a host the
                 // allowlist did not know, which is how every audio clip was refused.
+                captureVideoIfAwaited(uri)
                 val pathValue = uri.path.orEmpty().lowercase(Locale.US)
                 val isMediaFile = MEDIA_EXTENSIONS.any { ext -> pathValue.endsWith(ext) }
                 if (isMediaFile) {
@@ -254,7 +255,12 @@ class MainActivity : ComponentActivity() {
              */
             override fun onConsoleMessage(message: ConsoleMessage?): Boolean {
                 val text = message?.message() ?: return super.onConsoleMessage(message)
+                if (text.startsWith(AWAIT_PREFIX)) {
+                    awaitVideoUntil = System.currentTimeMillis() + 6000L
+                    return true
+                }
                 if (!text.startsWith(DOWNLOAD_PREFIX)) return super.onConsoleMessage(message)
+                awaitVideoUntil = 0L
                 startDownload(text.removePrefix(DOWNLOAD_PREFIX).trim())
                 return true
             }
@@ -380,6 +386,33 @@ class MainActivity : ComponentActivity() {
             pathValue.startsWith("/challenge/")
     }
 
+    /**
+     * Set by the page when a long press could not resolve a cover to its video: the
+     * page then triggers playback and, for a few seconds, the first video file the
+     * network filter sees is the one to save. Read on the network thread.
+     */
+    @Volatile private var awaitVideoUntil = 0L
+
+    private fun captureVideoIfAwaited(uri: Uri): Boolean {
+        if (System.currentTimeMillis() > awaitVideoUntil) return false
+        val pathValue = uri.path.orEmpty().lowercase(Locale.US)
+        val isVideo = VIDEO_EXTENSIONS.any { ext -> pathValue.endsWith(ext) } ||
+            pathValue.contains("/o1/v/")
+        if (!isVideo) return false
+        awaitVideoUntil = 0L
+        // Playback fetches byte ranges of the file; the whole file is the same URL
+        // without the range parameters.
+        val builder = uri.buildUpon().clearQuery()
+        uri.queryParameterNames.forEach { name ->
+            if (name != "bytestart" && name != "byteend") {
+                uri.getQueryParameters(name).forEach { value -> builder.appendQueryParameter(name, value) }
+            }
+        }
+        val full = builder.build().toString()
+        webView.post { startDownload(full) }
+        return true
+    }
+
     /** Saves a media file to the Downloads folder through the system downloader. */
     private fun startDownload(url: String) {
         val uri = url.toUri()
@@ -396,7 +429,7 @@ class MainActivity : ComponentActivity() {
                 .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
                 .addRequestHeader("User-Agent", webView.settings.userAgentString)
             (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
-            Toast.makeText(this, "Salvando em Downloads", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Salvando $name", Toast.LENGTH_SHORT).show()
         } catch (_: Exception) {
             Toast.makeText(this, "Nao foi possivel salvar", Toast.LENGTH_SHORT).show()
         }
@@ -536,6 +569,8 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val MESSAGES_URL = "https://www.instagram.com/direct/inbox/"
         private const val DOWNLOAD_PREFIX = "onlydms-download:"
+        private const val AWAIT_PREFIX = "onlydms-await-video"
+        private val VIDEO_EXTENSIONS = listOf(".mp4", ".m4v", ".webm", ".mov")
 
         /**
          * Replaces shared reels and posts in a thread with a text placeholder and
@@ -746,15 +781,104 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                // Schema-free pass for whatever format the data arrives in: any object
+                // whose nearby string values include both a video file URL and an image
+                // URL links those images to that video.
+                const VIDEO_URL = /^https:\/\/[^\s"']+\.(?:mp4|m4v|webm|mov)(?:[?#]|$)/i;
+                const IMAGE_URL = /^https:\/\/[^\s"']+\.(?:jpe?g|png|webp|heic)(?:[?#]|$)/i;
+
+                function gatherUrls(node, depth, out) {
+                    if (!node || depth > 3) {
+                        return;
+                    }
+                    if (typeof node === 'string') {
+                        if (VIDEO_URL.test(node) || node.indexOf('/o1/v/') !== -1 && node.indexOf('https:') === 0) {
+                            out.videos.push(node);
+                        } else if (IMAGE_URL.test(node)) {
+                            out.images.push(node);
+                        }
+                        return;
+                    }
+                    if (typeof node !== 'object') {
+                        return;
+                    }
+                    const values = Array.isArray(node) ? node : Object.keys(node).map(k => node[k]);
+                    for (let i = 0; i < values.length; i += 1) {
+                        gatherUrls(values[i], depth + 1, out);
+                    }
+                }
+
+                function harvestLoose(node, depth) {
+                    if (!node || typeof node !== 'object' || depth > 14) {
+                        return;
+                    }
+                    if (!Array.isArray(node)) {
+                        const out = { videos: [], images: [] };
+                        gatherUrls(node, 0, out);
+                        if (out.videos.length && out.images.length) {
+                            let best = out.videos[0];
+                            for (const v of out.videos) {
+                                if (v.length > best.length) {
+                                    best = v;
+                                }
+                            }
+                            for (const img of out.images) {
+                                const key = posterKey(img);
+                                if (key && !videoByPoster.has(key)) {
+                                    videoByPoster.set(key, best);
+                                }
+                            }
+                        }
+                    }
+                    const values = Array.isArray(node) ? node : Object.keys(node).map(k => node[k]);
+                    for (let i = 0; i < values.length; i += 1) {
+                        if (values[i] && typeof values[i] === 'object') {
+                            harvestLoose(values[i], depth + 1);
+                        }
+                    }
+                }
+
                 function harvestSafely(data, hint) {
                     try {
-                        if (hint !== undefined && (typeof hint !== 'string' || hint.indexOf('video_versions') === -1)) {
-                            return;
+                        if (typeof hint === 'string') {
+                            if (hint.indexOf('.mp4') === -1 && hint.indexOf('/o1/v/') === -1 &&
+                                hint.indexOf('video_versions') === -1) {
+                                return;
+                            }
                         }
                         harvest(data, 0);
+                        harvestLoose(data, 0);
                     } catch (e) {
                         // never break the page
                     }
+                }
+
+                // Thread data may arrive over a WebSocket rather than a fetch. Text frames
+                // that mention a video file are fed through the same harvest.
+                try {
+                    const originalAdd = WebSocket.prototype.addEventListener;
+                    WebSocket.prototype.addEventListener = function(type, listener, options) {
+                        if (type === 'message' && typeof listener === 'function') {
+                            const wrapped = function(event) {
+                                try {
+                                    if (typeof event.data === 'string' && event.data.indexOf('mp4') !== -1) {
+                                        const cleaned = event.data.replace(/\\\//g, '/');
+                                        const start = cleaned.indexOf('{');
+                                        if (start !== -1) {
+                                            harvestSafely(JSON.parse(cleaned.slice(start)), cleaned);
+                                        }
+                                    }
+                                } catch (e) {
+                                    // not JSON, or partial
+                                }
+                                return listener.apply(this, arguments);
+                            };
+                            return originalAdd.call(this, type, wrapped, options);
+                        }
+                        return originalAdd.apply(this, arguments);
+                    };
+                } catch (e) {
+                    // locked
                 }
 
                 try {
@@ -865,12 +989,75 @@ class MainActivity : ComponentActivity() {
                     return src.indexOf('https:') === 0 ? src : '';
                 }
 
-                function requestDownload(el) {
-                    const url = downloadUrlFor(el);
-                    if (!url) {
+                // When the cover cannot be linked to a video by any of the maps, the
+                // page is made to reveal it: the tap the user would have made is
+                // replayed, which starts the video, and the file is caught two ways -
+                // any <video> that appears with an https source, and the app's network
+                // filter, which sees the request for the file itself.
+                function anyVideoWithSource() {
+                    const videos = document.querySelectorAll('video');
+                    for (const v of videos) {
+                        rememberSource(v);
+                        const url = downloadUrlFor(v);
+                        if (url) {
+                            return url;
+                        }
+                    }
+                    return '';
+                }
+
+                function revealAndDownload(tapTarget, cover) {
+                    console.log('onlydms-await-video');
+                    try {
+                        if (tapTarget && tapTarget.click) {
+                            tapTarget.click();
+                        }
+                    } catch (e) {
+                        // the page rejected the synthetic tap
+                    }
+                    let tries = 0;
+                    const poll = setInterval(function() {
+                        tries += 1;
+                        const linked = videoByPoster.get(posterKey(cover.currentSrc || cover.src)) || anyVideoWithSource();
+                        if (linked) {
+                            clearInterval(poll);
+                            console.log('onlydms-download:' + linked);
+                        } else if (tries >= 10) {
+                            clearInterval(poll);
+                        }
+                    }, 400);
+                }
+
+                function requestDownload(el, tapTarget) {
+                    if (el.tagName === 'IMG') {
+                        const linked = videoByPoster.get(posterKey(el.currentSrc || el.src));
+                        if (linked) {
+                            console.log('onlydms-download:' + linked);
+                            return;
+                        }
+                        // No known video for this cover. A cover that sits on a video
+                        // shows a play badge; the JSON hint below is the cheapest test we
+                        // have for that, so instead ask the page to reveal it, but only
+                        // when the message row holds a play control or a video.
+                        const row = el.closest('[role="button"],a,[tabindex]') || el.parentElement;
+                        const looksLikeVideo = row && (row.querySelector('video') ||
+                            row.querySelector('svg[aria-label*="lay"], svg[aria-label*="eprod"], [aria-label*="ideo"]'));
+                        if (looksLikeVideo) {
+                            revealAndDownload(tapTarget, el);
+                            return;
+                        }
+                        const src = el.currentSrc || el.src || '';
+                        if (src.indexOf('https:') === 0) {
+                            console.log('onlydms-download:' + src);
+                        }
                         return;
                     }
-                    console.log('onlydms-download:' + url);
+                    const url = downloadUrlFor(el);
+                    if (url) {
+                        console.log('onlydms-download:' + url);
+                        return;
+                    }
+                    revealAndDownload(tapTarget, el);
                 }
 
                 // The element under the finger is often a transparent tap layer, not the
@@ -944,10 +1131,11 @@ class MainActivity : ComponentActivity() {
                     if (!isSaveable(target)) {
                         return;
                     }
+                    const tapTarget = e.target;
                     pressStart = { x: touch.clientX, y: touch.clientY };
                     pressTimer = setTimeout(function() {
                         pressTimer = null;
-                        requestDownload(target);
+                        requestDownload(target, tapTarget);
                     }, PRESS_MS);
                 }, { capture: true, passive: true });
 

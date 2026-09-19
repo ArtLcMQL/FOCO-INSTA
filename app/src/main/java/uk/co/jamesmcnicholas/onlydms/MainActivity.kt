@@ -692,6 +692,7 @@ class MainActivity : ComponentActivity() {
                 // long press relies on, because the cover the user presses is a separate
                 // <img> that shares the video's poster - and the <video> may live in a
                 // different container, or have been torn down and rebuilt as a blob.
+
                 const videoByPoster = new Map();
 
                 function posterKey(url) {
@@ -699,6 +700,83 @@ class MainActivity : ComponentActivity() {
                         return '';
                     }
                     return String(url).split('?')[0].split('#')[0].split('/').pop();
+                }
+
+                // The authoritative link between a cover and its video is in the data
+                // Instagram fetches for the thread: each video message carries
+                // image_versions2 (cover URLs) next to video_versions (file URLs). Every
+                // JSON the page parses is walked for that pair, so the map is filled
+                // before the message is even drawn - and never depends on the DOM.
+                function harvest(node, depth) {
+                    if (!node || typeof node !== 'object' || depth > 12) {
+                        return;
+                    }
+                    if (Array.isArray(node)) {
+                        for (let i = 0; i < node.length; i += 1) {
+                            harvest(node[i], depth + 1);
+                        }
+                        return;
+                    }
+                    const videos = node.video_versions;
+                    const covers = node.image_versions2 && node.image_versions2.candidates;
+                    if (Array.isArray(videos) && videos.length && Array.isArray(covers)) {
+                        let best = null;
+                        for (const v of videos) {
+                            if (v && typeof v.url === 'string' && v.url.indexOf('https:') === 0) {
+                                if (!best || (v.width || 0) > (best.width || 0)) {
+                                    best = v;
+                                }
+                            }
+                        }
+                        if (best) {
+                            for (const c of covers) {
+                                const key = c && posterKey(c.url);
+                                if (key) {
+                                    videoByPoster.set(key, best.url);
+                                }
+                            }
+                        }
+                    }
+                    const keys = Object.keys(node);
+                    for (let k = 0; k < keys.length; k += 1) {
+                        const child = node[keys[k]];
+                        if (child && typeof child === 'object') {
+                            harvest(child, depth + 1);
+                        }
+                    }
+                }
+
+                function harvestSafely(data, hint) {
+                    try {
+                        if (hint !== undefined && (typeof hint !== 'string' || hint.indexOf('video_versions') === -1)) {
+                            return;
+                        }
+                        harvest(data, 0);
+                    } catch (e) {
+                        // never break the page
+                    }
+                }
+
+                try {
+                    const originalParse = JSON.parse;
+                    JSON.parse = function(text) {
+                        const parsed = originalParse.apply(this, arguments);
+                        harvestSafely(parsed, text);
+                        return parsed;
+                    };
+                } catch (e) {
+                    // locked
+                }
+                try {
+                    const originalJson = Response.prototype.json;
+                    Response.prototype.json = function() {
+                        return originalJson.apply(this, arguments).then(function(data) {
+                            harvestSafely(data);
+                            return data;
+                        });
+                    };
+                } catch (e) {
+                    // locked
                 }
 
                 function rememberSource(media) {
